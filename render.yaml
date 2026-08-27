@@ -1,0 +1,13 @@
+# Render Blueprint —— 卫生许可个人业务工作台（纯静态站点）
+# 部署方式：把本仓库推到 GitHub/GitLab，在 Render 选择「New + → Blueprint」并连接仓库，
+# Render 会自动按此文件创建静态站点。也可在 Render 手动新建 Static Site，
+# 发布目录填 ./workbench 即可。
+services:
+  - name: water-cx-workbench
+    type: web                 # 静态站点与 Web 服务都用 web
+    runtime: static           # 静态站点运行时
+    buildCommand: "echo 'static site, no build needed'"
+    staticPublishPath: ./workbench   # 含 index.html / app.js / seed.js 的目录（相对仓库根）
+    pullRequestPreviewsEnabled: false
+    # 默认会分配 *.onrender.com 的公网 HTTPS 域名，电脑/手机均可直接访问。
+    # 如需自定义域名，可在 Render 控制台绑定。
