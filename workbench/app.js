@@ -165,6 +165,7 @@
     if(!c){ if(!silent) toast("请先在设置中配置 Supabase", "warn"); return; }
     try{
       var rows = toRows();
+      if(!rows.length){ if(!silent) toast("本地无数据，未上传", "warn"); return; }
       var res = await c.from(state.settings.supabaseTable).upsert(rows, { onConflict:"license" });
       if(res.error){
         // 若 units 表尚未创建 remark 列，去掉备注后重试，保证其余字段仍同步
@@ -173,11 +174,18 @@
           var res2 = await c.from(state.settings.supabaseTable).upsert(rows2, { onConflict:"license" });
           if(res2.error) throw res2.error;
           if(!silent) toast("已上传 "+rows2.length+" 条（备注列尚未创建，备注暂未同步）", "warn");
-          return;
+        } else {
+          throw res.error;
         }
-        throw res.error;
       }
-      if(!silent) toast("已上传 "+rows.length+" 条到云端", "ok");
+      // 同步删除：清理云端“本地已不存在”的记录（按许可证号），
+      // 否则每次打开页面的自动合并会把已删除的记录从云端重新加回，导致删除不持久。
+      var licenses = rows.map(function(r){ return r.license; }).filter(function(l){ return l; });
+      if(licenses.length){
+        var del = await c.from(state.settings.supabaseTable).delete().not("license", "in", licenses);
+        if(del.error && !silent) toast("云端清理已删记录失败：" + (del.error.message || del.error), "warn");
+      }
+      if(!silent) toast("已同步 "+rows.length+" 条到云端", "ok");
     }catch(e){
       if(!silent) toast("上传失败：" + (e.message||e), "err");
     }
@@ -767,6 +775,7 @@
     state.data = state.data.filter(function(r){ return !state.selected[r._uid]; });
     keys.forEach(function(k){ delete state.selected[k]; });
     saveData();
+    pushCloud(true);   // 立即把删除同步到云端，避免刷新后被自动合并重新加回
     renderLedger();
     if(state.view==="map") placeMarkers();
     toast("已删除 "+keys.length+" 条", "ok");
