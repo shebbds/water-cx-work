@@ -180,10 +180,21 @@
       }
       // 同步删除：清理云端“本地已不存在”的记录（按许可证号），
       // 否则每次打开页面的自动合并会把已删除的记录从云端重新加回，导致删除不持久。
+      // 用 select 取出云端许可证号做差集，再用已实测可靠的 .in() 精确删除（不依赖 .not 数组写法）。
       var licenses = rows.map(function(r){ return r.license; }).filter(function(l){ return l; });
       if(licenses.length){
-        var del = await c.from(state.settings.supabaseTable).delete().not("license", "in", licenses);
-        if(del.error && !silent) toast("云端清理已删记录失败：" + (del.error.message || del.error), "warn");
+        var all = await c.from(state.settings.supabaseTable).select("license");
+        if(all.error){
+          if(!silent) toast("云端清理已删记录失败：" + (all.error.message || all.error), "warn");
+        } else {
+          var localSet = {};
+          licenses.forEach(function(l){ localSet[l] = true; });
+          var toDelete = (all.data || []).map(function(d){ return d.license; }).filter(function(l){ return l && !localSet[l]; });
+          if(toDelete.length){
+            var del = await c.from(state.settings.supabaseTable).delete().in("license", toDelete);
+            if(del.error && !silent) toast("云端清理已删记录失败：" + (del.error.message || del.error), "warn");
+          }
+        }
       }
       if(!silent) toast("已同步 "+rows.length+" 条到云端", "ok");
     }catch(e){
@@ -775,7 +786,7 @@
     state.data = state.data.filter(function(r){ return !state.selected[r._uid]; });
     keys.forEach(function(k){ delete state.selected[k]; });
     saveData();
-    pushCloud(true);   // 立即把删除同步到云端，避免刷新后被自动合并重新加回
+    pushCloud(false);   // 立即把删除同步到云端（可见提示），避免刷新后被自动合并重新加回
     renderLedger();
     if(state.view==="map") placeMarkers();
     toast("已删除 "+keys.length+" 条", "ok");
