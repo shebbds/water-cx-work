@@ -187,22 +187,46 @@
     if(syncTimer) clearTimeout(syncTimer);
     syncTimer = setTimeout(function(){ pushCloud(true); }, 1500);
   }
-  async function pullCloud(){
+  // 从云端拉取。opts: { confirm:是否先确认覆盖, merge:按许可证号合并(保留本地独有记录、坐标不空覆盖),
+  //                  quietError:静默错误提示, silent:静默全部提示 }
+  async function pullCloud(opts){
+    opts = opts || {};
     var c = getSb();
-    if(!c){ toast("请先在设置中配置 Supabase", "warn"); return; }
+    if(!c){ if(!opts.silent) toast("请先在设置中配置 Supabase", "warn"); return; }
+    if(opts.confirm !== false && opts.merge !== true){
+      if(!confirm("从云端拉取将用云端数据覆盖本地全部记录，确定继续？")) return;
+    }
     try{
       var res = await c.from(state.settings.supabaseTable).select("*");
       if(res.error) throw res.error;
-      var mapped = (res.data||[]).map(function(d){
-        return { _uid: uid(), id:d.id, name:d.name, address:d.address, license:d.license,
-          validFrom:d.valid_from, validTo:d.valid_to, lng:d.lng, lat:d.lat, remark:d.remark||"" };
-      });
-      state.data = mapped;
+      var rows = res.data || [];
+      if(opts.merge === true){
+        // 合并模式：云端优先，但保留本地独有记录，且坐标以“非空”为准，不丢本地已编码坐标
+        var byLicense = {};
+        state.data.forEach(function(r){ if(r.license) byLicense[r.license] = r; });
+        rows.forEach(function(d){
+          var base = byLicense[d.license];
+          if(base){
+            base.id = d.id; base.name = d.name; base.address = d.address;
+            base.validFrom = d.valid_from; base.validTo = d.valid_to; base.remark = (d.remark||"");
+            if(d.lng != null) base.lng = d.lng;
+            if(d.lat != null) base.lat = d.lat;
+          } else {
+            state.data.push({ _uid: uid(), id:d.id, name:d.name, address:d.address, license:d.license,
+              validFrom:d.valid_from, validTo:d.valid_to, lng:d.lng, lat:d.lat, remark:(d.remark||"") });
+          }
+        });
+      } else {
+        state.data = rows.map(function(d){
+          return { _uid: uid(), id:d.id, name:d.name, address:d.address, license:d.license,
+            validFrom:d.valid_from, validTo:d.valid_to, lng:d.lng, lat:d.lat, remark:(d.remark||"") };
+        });
+      }
       saveDataLocal();
       renderCurrentView();
-      toast("已从云端拉取 "+mapped.length+" 条", "ok");
+      if(rows.length) toast("已从云端同步 "+rows.length+" 条"+(opts.merge?"（已与本地合并）":""), "ok");
     }catch(e){
-      toast("拉取失败：" + (e.message||e), "err");
+      if(!opts.quietError && !opts.silent) toast("拉取失败：" + (e.message||e), "err");
     }
   }
 
@@ -921,8 +945,16 @@
     });
 
     // Supabase 库加载（CDN）
+    var autoPulled = false;
     var sb = document.createElement("script");
     sb.src = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2";
+    sb.onload = function(){
+      // Supabase 就绪后，自动从云端合并一次：打开页面即与云端同步，无需手动拉取
+      if(!autoPulled && state.settings.supabaseUrl && state.settings.supabaseKey){
+        autoPulled = true;
+        pullCloud({ confirm:false, merge:true, quietError:true });
+      }
+    };
     document.head.appendChild(sb);
     // SheetJS 库加载（CDN）
     var xls = document.createElement("script");
