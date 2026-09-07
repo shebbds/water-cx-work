@@ -22,6 +22,7 @@
     view: "home",
     homeWindow: 30,
     selected: {},          // uid -> true
+    sessionNew: {},        // 本次会话内新增的许可证号（轮询删除保护，避免未推送就被清掉）
     amap: null,
     geocoder: null,
     amapReady: false,
@@ -204,10 +205,50 @@
   var syncTimer = null;
   function scheduleSync(){
     if(syncTimer) clearTimeout(syncTimer);
-    syncTimer = setTimeout(function(){ pushCloud(true); }, 1500);
+    // 操作后“马上”同步：短防抖仅用于合并连续操作，默认 500ms 内必达云端
+    syncTimer = setTimeout(function(){ pushCloud(true); }, 500);
   }
-  // 从云端拉取。opts: { confirm:是否先确认覆盖, merge:按许可证号合并(保留本地独有记录、坐标不空覆盖),
-  //                  quietError:静默错误提示, silent:静默全部提示 }
+  // 是否正在被用户操作（弹窗打开 / 地图选点中），此时轮询不打断界面
+  function isInteractive(){
+    return !!document.getElementById("modal-overlay") || !!state.pickMode;
+  }
+  // 把云端 rows 合并进本地 state.data。返回是否发生变化。
+  // opts.merge=true 时：云端优先覆盖匹配项；云端独有则新增；本地有而云端没有（且非本次会话新增）则删除（跨设备删除传播）。
+  function mergeFromCloud(rows, opts){
+    var changed = false;
+    var cloudBy = {};
+    rows.forEach(function(d){ if(d.license) cloudBy[d.license] = d; });
+    rows.forEach(function(d){
+      if(!d.license) return;
+      var base = state.data.find(function(r){ return r.license === d.license; });
+      if(base){
+        if(base.id !== d.id || base.name !== d.name || base.address !== d.address ||
+           base.validFrom !== d.valid_from || base.validTo !== d.valid_to || (base.remark||"") !== (d.remark||"") ||
+           (d.lng != null && base.lng !== d.lng) || (d.lat != null && base.lat !== d.lat)) changed = true;
+        base.id = d.id; base.name = d.name; base.address = d.address;
+        base.validFrom = d.valid_from; base.validTo = d.valid_to; base.remark = (d.remark||"");
+        if(d.lng != null) base.lng = d.lng;
+        if(d.lat != null) base.lat = d.lat;
+      } else {
+        state.data.push({ _uid: uid(), id:d.id, name:d.name, address:d.address, license:d.license,
+          validFrom:d.valid_from, validTo:d.valid_to, lng:d.lng, lat:d.lat, remark:(d.remark||"") });
+        changed = true;
+      }
+    });
+    if(opts && opts.merge === true){
+      var before = state.data.length;
+      state.data = state.data.filter(function(r){
+        if(!r.license) return true;                  // 无许可证号无法对应云端，保留
+        if(cloudBy[r.license]) return true;           // 云端仍有，保留
+        if(state.sessionNew[r.license]) return true;  // 本次会话新增、尚未推送，保留（防误删）
+        return false;                                 // 否则视为其他设备已删除 → 移除
+      });
+      if(state.data.length !== before) changed = true;
+    }
+    return changed;
+  }
+  // 从云端拉取。opts: { confirm:是否先确认覆盖, merge:按许可证号合并(含跨设备删除传播),
+  //                  quietError:静默错误提示, silent:静默全部提示(用于后台轮询) }
   async function pullCloud(opts){
     opts = opts || {};
     var c = getSb();
@@ -219,34 +260,29 @@
       var res = await c.from(state.settings.supabaseTable).select("*");
       if(res.error) throw res.error;
       var rows = res.data || [];
-      if(opts.merge === true){
-        // 合并模式：云端优先，但保留本地独有记录，且坐标以“非空”为准，不丢本地已编码坐标
-        var byLicense = {};
-        state.data.forEach(function(r){ if(r.license) byLicense[r.license] = r; });
-        rows.forEach(function(d){
-          var base = byLicense[d.license];
-          if(base){
-            base.id = d.id; base.name = d.name; base.address = d.address;
-            base.validFrom = d.valid_from; base.validTo = d.valid_to; base.remark = (d.remark||"");
-            if(d.lng != null) base.lng = d.lng;
-            if(d.lat != null) base.lat = d.lat;
-          } else {
-            state.data.push({ _uid: uid(), id:d.id, name:d.name, address:d.address, license:d.license,
-              validFrom:d.valid_from, validTo:d.valid_to, lng:d.lng, lat:d.lat, remark:(d.remark||"") });
-          }
-        });
-      } else {
-        state.data = rows.map(function(d){
-          return { _uid: uid(), id:d.id, name:d.name, address:d.address, license:d.license,
-            validFrom:d.valid_from, validTo:d.valid_to, lng:d.lng, lat:d.lat, remark:(d.remark||"") };
-        });
-      }
+      var changed = mergeFromCloud(rows, opts);
       saveDataLocal();
-      renderCurrentView();
-      if(rows.length) toast("已从云端同步 "+rows.length+" 条"+(opts.merge?"（已与本地合并）":""), "ok");
+      if(changed){
+        // 后台轮询：仅在无弹窗/非选点时重渲染，避免打断用户
+        if(!opts.silent || !isInteractive()) renderCurrentView();
+        if(!opts.silent) toast("已从云端同步 "+rows.length+" 条"+(opts.merge?"（已与本地合并）":""), "ok");
+      } else if(!opts.silent){
+        toast("云端无变化", "ok");
+      }
     }catch(e){
       if(!opts.quietError && !opts.silent) toast("拉取失败：" + (e.message||e), "err");
     }
+  }
+  // 定时轮询：每 15 秒把云端变更合并到本地，实现不同设备之间的同步显示
+  var autoSyncTimer = null;
+  function pollCloud(){
+    var c = getSb();
+    if(!c) return;
+    pullCloud({ confirm:false, merge:true, silent:true });
+  }
+  function startAutoSync(){
+    if(autoSyncTimer) clearInterval(autoSyncTimer);
+    autoSyncTimer = setInterval(pollCloud, 15000);
   }
 
   /* ---------------- 高德地图 ---------------- */
@@ -711,6 +747,7 @@
       lng: null, lat: null
     };
     state.data.push(rec);
+    if(rec.license) state.sessionNew[rec.license] = true;   // 本次会话新增，轮询删除保护
     saveData(false);
     ensureAmap().then(function(){ return geocodeMany([rec]); }).then(function(){
       saveData(); renderLedger(); if(state.view==="map") placeMarkers();
@@ -762,6 +799,7 @@
               lng: null, lat: null
             };
             state.data.push(rec);
+            if(lic) state.sessionNew[lic] = true;   // 本次会话新增，轮询删除保护
             added++;
             if(address) toGeocode.push(rec);
           }
@@ -995,6 +1033,7 @@
     bind();
     updateStat();
     switchView("home");
+    startAutoSync();   // 启动 15 秒定时云端合并，实现不同设备间同步显示
   }
   if(document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
   else init();
