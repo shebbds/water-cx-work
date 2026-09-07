@@ -726,7 +726,7 @@
   }
   function updateLedgerHint(){
     var n = Object.keys(state.selected).filter(function(k){ return state.selected[k]; }).length;
-    $("ledger-hint").textContent = n ? ("已选中 "+n+" 条，可批量删除") : "";
+    $("ledger-hint").textContent = n ? ("已选中 "+n+" 条，可批量删除或导出选中") : "";
   }
 
   function addManual(){
@@ -837,6 +837,19 @@
     a.download = "卫生许可台账_导出.json";
     a.click();
     URL.revokeObjectURL(a.href);
+  }
+  // 导出当前勾选的记录（未勾选则提示先选择）
+  function exportSelected(){
+    var keys = Object.keys(state.selected).filter(function(k){ return state.selected[k]; });
+    if(!keys.length){ toast("请先勾选要导出的记录", "warn"); return; }
+    var rows = state.data.filter(function(r){ return state.selected[r._uid]; });
+    var blob = new Blob([JSON.stringify(rows, null, 2)], { type:"application/json" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "卫生许可台账_选中导出.json";
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast("已导出选中的 "+rows.length+" 条", "ok");
   }
 
   /* ---------------- 地图渲染 ---------------- */
@@ -960,6 +973,7 @@
       this.value = "";
     });
     $("batch-delete").addEventListener("click", batchDelete);
+    $("export-selected-btn").addEventListener("click", exportSelected);
     $("export-btn").addEventListener("click", exportJson);
     // 台账搜索
     $("ledger-search").addEventListener("input", function(){
