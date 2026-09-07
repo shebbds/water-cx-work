@@ -830,25 +830,43 @@
     toast("已删除 "+keys.length+" 条", "ok");
   }
 
-  function exportJson(){
-    var blob = new Blob([JSON.stringify(state.data, null, 2)], { type:"application/json" });
+  // 将记录数组导出为 Excel(.xlsx) 并触发下载
+  function downloadXlsx(rows, filename){
+    if(!window.XLSX){ toast("表格库未加载，请刷新页面后重试", "err"); return; }
+    var data = rows.map(function(r){
+      return {
+        "编号": r.id || "",
+        "单位名称": r.name || "",
+        "经营地址": r.address || "",
+        "卫生许可证号": r.license || "",
+        "有效期始": r.validFrom || "",
+        "有效期止": r.validTo || "",
+        "备注": r.remark || "",
+        "经度": (r.lng != null ? r.lng : ""),
+        "纬度": (r.lat != null ? r.lat : "")
+      };
+    });
+    var ws = window.XLSX.utils.json_to_sheet(data);
+    var wb = window.XLSX.utils.book_new();
+    window.XLSX.utils.book_append_sheet(wb, ws, "单位台账");
+    var out = window.XLSX.write(wb, { bookType:"xlsx", type:"array" });
+    var blob = new Blob([out], { type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
     var a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = "卫生许可台账_导出.json";
+    a.download = filename;
     a.click();
     URL.revokeObjectURL(a.href);
   }
-  // 导出当前勾选的记录（未勾选则提示先选择）
+  // 导出全部为 Excel
+  function exportExcel(){
+    downloadXlsx(state.data, "卫生许可台账.xlsx");
+  }
+  // 导出当前勾选的记录为 Excel（未勾选则提示先选择）
   function exportSelected(){
     var keys = Object.keys(state.selected).filter(function(k){ return state.selected[k]; });
     if(!keys.length){ toast("请先勾选要导出的记录", "warn"); return; }
     var rows = state.data.filter(function(r){ return state.selected[r._uid]; });
-    var blob = new Blob([JSON.stringify(rows, null, 2)], { type:"application/json" });
-    var a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "卫生许可台账_选中导出.json";
-    a.click();
-    URL.revokeObjectURL(a.href);
+    downloadXlsx(rows, "卫生许可台账_选中导出.xlsx");
     toast("已导出选中的 "+rows.length+" 条", "ok");
   }
 
@@ -974,7 +992,7 @@
     });
     $("batch-delete").addEventListener("click", batchDelete);
     $("export-selected-btn").addEventListener("click", exportSelected);
-    $("export-btn").addEventListener("click", exportJson);
+    $("export-btn").addEventListener("click", exportExcel);
     // 台账搜索
     $("ledger-search").addEventListener("input", function(){
       state.ledgerQuery = this.value;
