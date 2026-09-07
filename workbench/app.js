@@ -160,24 +160,51 @@
     var m = (err.message||"") + " " + (err.hint||"");
     return m.indexOf("remark") >= 0 && (m.indexOf("does not exist") >= 0 || m.indexOf("column") >= 0);
   }
+  // 分批并发上传；单批失败则逐条重试（先带 remark、再试去 remark）以隔离“坏行”
+  // （如重复许可证号/编号），保证能传的记录都传上去，并收集失败信息。
+  async function upsertChunked(c, table, rows){
+    var CHUNK = 20, failed = [], firstErr = null;
+    for(var i=0; i<rows.length; i+=CHUNK){
+      var chunk = rows.slice(i, i+CHUNK);
+      try{
+        var res = await c.from(table).upsert(chunk, { onConflict:"license" });
+        if(res.error) throw res.error;
+      }catch(e){
+        for(var k=0; k<chunk.length; k++){
+          var row = chunk[k];
+          try{
+            var r1 = await c.from(table).upsert([row], { onConflict:"license" });
+            if(r1.error) throw r1.error;
+          }catch(e1){
+            try{   // 再试一次去 remark（兼容 remark 列不存在的情况）
+              var rs = Object.assign({}, row); delete rs.remark;
+              var r2 = await c.from(table).upsert([rs], { onConflict:"license" });
+              if(r2.error) throw r2.error;
+            }catch(e2){
+              failed.push(row.license || "(无许可证号)");
+              if(!firstErr) firstErr = (e2 && (e2.message||e2)) || (e1 && (e1.message||e1)) || e2 || e1;
+            }
+          }
+        }
+      }
+    }
+    return { failed: failed, firstErr: firstErr };
+  }
   async function pushCloud(silent){
     var c = getSb();
     if(!c){ if(!silent) toast("请先在设置中配置 Supabase", "warn"); return; }
     try{
       var rows = toRows();
       if(!rows.length){ if(!silent) toast("本地无数据，未上传", "warn"); return; }
+      // 首轮整批上传（含 remark）。若报 remark 列缺失则整批去 remark 后走分批；
+      // 其它错误（如重复许可证号）不剥离，交给分批逐条隔离坏行。
       var res = await c.from(state.settings.supabaseTable).upsert(rows, { onConflict:"license" });
-      if(res.error){
-        // 若 units 表尚未创建 remark 列，去掉备注后重试，保证其余字段仍同步
-        if(isRemarkColumnError(res.error)){
-          var rows2 = rows.map(function(r){ var x = Object.assign({}, r); delete x.remark; return x; });
-          var res2 = await c.from(state.settings.supabaseTable).upsert(rows2, { onConflict:"license" });
-          if(res2.error) throw res2.error;
-          if(!silent) toast("已上传 "+rows2.length+" 条（备注列尚未创建，备注暂未同步）", "warn");
-        } else {
-          throw res.error;
-        }
+      var uploadRows = rows;
+      if(res.error && isRemarkColumnError(res.error)){
+        uploadRows = rows.map(function(r){ var x = Object.assign({}, r); delete x.remark; return x; });
+        if(!silent) toast("备注列尚未创建，备注暂未同步（其余字段正常）", "warn");
       }
+      var result = await upsertChunked(c, state.settings.supabaseTable, uploadRows);
       // 同步删除：清理云端“本地已不存在”的记录（按许可证号），
       // 否则每次打开页面的自动合并会把已删除的记录从云端重新加回，导致删除不持久。
       // 用 select 取出云端许可证号做差集，再用已实测可靠的 .in() 精确删除（不依赖 .not 数组写法）。
@@ -196,11 +223,15 @@
           }
         }
       }
-      // 标记本地全部记录“已成功同步到云端”：拉取合并时据此区分
-      // “尚未推送的本地新增（须保留）”与“已同步但云端已删除（跨设备删除，可移除）”
-      state.data.forEach(function(r){ r._synced = true; });
+      // 标记“成功上传”的记录为已同步（拉取合并时据此区分未推送新增与跨设备删除）
+      var failedSet = {}; result.failed.forEach(function(l){ failedSet[l] = true; });
+      state.data.forEach(function(r){ if(r.license && !failedSet[r.license]) r._synced = true; });
       saveDataLocal();
-      if(!silent) toast("已同步 "+rows.length+" 条到云端", "ok");
+      if(result.failed.length === 0){
+        if(!silent) toast("已同步 "+uploadRows.length+" 条到云端", "ok");
+      } else {
+        if(!silent) toast("已上传 "+(uploadRows.length-result.failed.length)+"/"+uploadRows.length+" 条，"+result.failed.length+" 条失败（多为重复许可证号，请检查）："+(result.firstErr||""), "err");
+      }
     }catch(e){
       if(!silent) toast("上传失败：" + (e.message||e), "err");
     }
