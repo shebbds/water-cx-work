@@ -22,7 +22,6 @@
     view: "home",
     homeWindow: 30,
     selected: {},          // uid -> true
-    sessionNew: {},        // 本次会话内新增的许可证号（轮询删除保护，避免未推送就被清掉）
     amap: null,
     geocoder: null,
     amapReady: false,
@@ -197,6 +196,10 @@
           }
         }
       }
+      // 标记本地全部记录“已成功同步到云端”：拉取合并时据此区分
+      // “尚未推送的本地新增（须保留）”与“已同步但云端已删除（跨设备删除，可移除）”
+      state.data.forEach(function(r){ r._synced = true; });
+      saveDataLocal();
       if(!silent) toast("已同步 "+rows.length+" 条到云端", "ok");
     }catch(e){
       if(!silent) toast("上传失败：" + (e.message||e), "err");
@@ -229,9 +232,10 @@
         base.validFrom = d.valid_from; base.validTo = d.valid_to; base.remark = (d.remark||"");
         if(d.lng != null) base.lng = d.lng;
         if(d.lat != null) base.lat = d.lat;
+        base._synced = true;
       } else {
         state.data.push({ _uid: uid(), id:d.id, name:d.name, address:d.address, license:d.license,
-          validFrom:d.valid_from, validTo:d.valid_to, lng:d.lng, lat:d.lat, remark:(d.remark||"") });
+          validFrom:d.valid_from, validTo:d.valid_to, lng:d.lng, lat:d.lat, remark:(d.remark||""), _synced:true });
         changed = true;
       }
     });
@@ -240,8 +244,8 @@
       state.data = state.data.filter(function(r){
         if(!r.license) return true;                  // 无许可证号无法对应云端，保留
         if(cloudBy[r.license]) return true;           // 云端仍有，保留
-        if(state.sessionNew[r.license]) return true;  // 本次会话新增、尚未推送，保留（防误删）
-        return false;                                 // 否则视为其他设备已删除 → 移除
+        if(!r._synced) return true;                  // 本地新增尚未成功推送过，保留（防刷新/拉取误删）
+        return false;                                 // 已同步但云端已无 → 视为其他设备已删除，移除
       });
       if(state.data.length !== before) changed = true;
     }
@@ -746,8 +750,8 @@
       remark: $("add-remark") ? $("add-remark").value.trim() : "",
       lng: null, lat: null
     };
+    rec._synced = false;   // 新增尚未推送，拉取合并时受保护（避免刷新/拉取被误删）
     state.data.push(rec);
-    if(rec.license) state.sessionNew[rec.license] = true;   // 本次会话新增，轮询删除保护
     saveData(false);
     ensureAmap().then(function(){ return geocodeMany([rec]); }).then(function(){
       saveData(); renderLedger(); if(state.view==="map") placeMarkers();
@@ -799,7 +803,7 @@
               lng: null, lat: null
             };
             state.data.push(rec);
-            if(lic) state.sessionNew[lic] = true;   // 本次会话新增，轮询删除保护
+            rec._synced = false;   // 新增尚未推送，拉取合并时受保护
             added++;
             if(address) toGeocode.push(rec);
           }
